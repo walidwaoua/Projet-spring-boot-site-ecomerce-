@@ -1,0 +1,249 @@
+{
+  "info": {
+    "_postman_id": "f77997ad-5d60-4c83-9c60-99c56c3447af",
+    "name": "Commande Express - V2 Eureka Gateway et V3 Config Server",
+    "description": "Vérifie le registre Eureka, les configurations centralisées et les routes Gateway vers les endpoints Catalogue et Utilisateurs existants. Démarrer Eureka, Config Server, les services, puis la Gateway avant l'exécution.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "gatewayUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "eurekaUrl",
+      "value": "http://localhost:8761"
+    },
+    {
+      "key": "configUrl",
+      "value": "http://localhost:8888"
+    }
+  ],
+  "item": [
+    {
+      "name": "V2 - Eureka",
+      "item": [
+        {
+          "name": "Lister les services enregistrés",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{eurekaUrl}}/eureka/apps"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Eureka répond', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Le registre contient des applications', function () {",
+                  "  const body = pm.response.json();",
+                  "  const apps = body.applications.application || [];",
+                  "  pm.expect(apps.length).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "V3 - Config Server",
+      "item": [
+        {
+          "name": "Configuration Catalogue",
+          "request": {
+            "method": "GET",
+            "url": "{{configUrl}}/service-catalogue/default"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Configuration disponible', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Sources de propriétés présentes', function () { pm.expect(pm.response.json().propertySources.length).to.be.above(0); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Configuration Utilisateurs",
+          "request": {
+            "method": "GET",
+            "url": "{{configUrl}}/service-utilisateurs/default"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Configuration disponible', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Configuration Commande",
+          "request": {
+            "method": "GET",
+            "url": "{{configUrl}}/service-commande/default"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Configuration disponible', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Configuration Stock",
+          "request": {
+            "method": "GET",
+            "url": "{{configUrl}}/service-stock/default"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Configuration disponible', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Configuration Notification",
+          "request": {
+            "method": "GET",
+            "url": "{{configUrl}}/service-notification/default"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Configuration disponible', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Configuration Gateway",
+          "request": {
+            "method": "GET",
+            "url": "{{configUrl}}/api-gateway/default"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Configuration disponible', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "V2 - Routage Gateway",
+      "item": [
+        {
+          "name": "Catalogue - route statique",
+          "request": {
+            "method": "GET",
+            "url": "{{gatewayUrl}}/products"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Le catalogue est accessible via la Gateway', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Catalogue - découverte dynamique",
+          "request": {
+            "method": "GET",
+            "url": "{{gatewayUrl}}/service-catalogue/products"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Le catalogue est découvert par Eureka', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Utilisateurs - route statique",
+          "request": {
+            "method": "GET",
+            "url": "{{gatewayUrl}}/users"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Le service Utilisateurs est accessible via la Gateway', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Utilisateurs - découverte dynamique",
+          "request": {
+            "method": "GET",
+            "url": "{{gatewayUrl}}/service-utilisateurs/users"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Le service Utilisateurs est découvert par Eureka', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
