@@ -11,7 +11,7 @@ La configuration PostgreSQL commune utilise `DB_USERNAME`, `DB_PASSWORD` et `DB_
 Depuis la racine du projet, démarrez les dépendances :
 
 ```powershell
-docker compose up -d postgres redis kafka
+docker compose up -d postgres redis kafka rabbitmq
 ```
 
 Le Config Server lit le dépôt Git local `config-repo/` avec `file:../config-repo`. Les fichiers de configuration sont commités dans ce dépôt local sur sa branche `main` avant le démarrage du Config Server. Si tu remplaces l’URI par un dépôt Git distant, mets à jour `CONFIG_REPO_URI`.

@@ -9,6 +9,7 @@ import com.ecommerce.commande.entities.OrderLine;
 import com.ecommerce.commande.enums.OrderStatus;
 import com.ecommerce.commande.exceptions.InvalidOrderStateException;
 import com.ecommerce.commande.exceptions.OrderNotFoundException;
+import com.ecommerce.commande.messaging.OrderEventPublisher;
 import com.ecommerce.commande.repositories.OrderLineRepository;
 import com.ecommerce.commande.repositories.OrderRepository;
 import com.ecommerce.commande.clients.*;
@@ -33,11 +34,13 @@ public class OrderService {
     private final UserClient users;
     private final ProductClient products;
     private final StockClient stock;
+    private final OrderEventPublisher orderEventPublisher;
 
-    public OrderService(OrderRepository orderRepository, OrderLineRepository orderLineRepository, UserClient users, ProductClient products, StockClient stock) {
+    public OrderService(OrderRepository orderRepository, OrderLineRepository orderLineRepository, UserClient users, ProductClient products, StockClient stock, OrderEventPublisher orderEventPublisher) {
         this.orderRepository = orderRepository;
         this.orderLineRepository = orderLineRepository;
         this.users = users; this.products = products; this.stock = stock;
+        this.orderEventPublisher = orderEventPublisher;
     }
 
     @Transactional(readOnly = true)
@@ -76,7 +79,9 @@ public class OrderService {
         try {
             stock.reserve(quantities); reserved = true;
             order.setStatut(OrderStatus.CONFIRMEE);
-            return toResponse(orderRepository.save(order), savedLines);
+            Order savedOrder = orderRepository.save(order);
+            orderEventPublisher.publishOrderConfirmed(savedOrder);
+            return toResponse(savedOrder, savedLines);
         } catch (RuntimeException e) {
             if (reserved) try { stock.release(quantities); } catch (RuntimeException compensation) { e.addSuppressed(compensation); }
             throw e;
@@ -94,7 +99,9 @@ public class OrderService {
         List<OrderLine> lines = orderLineRepository.findAllByOrderId(orderId);
         stock.reserve(aggregateStock(lines));
         order.setStatut(OrderStatus.CONFIRMEE);
-        return toResponse(orderRepository.save(order), lines);
+        Order savedOrder = orderRepository.save(order);
+        orderEventPublisher.publishOrderConfirmed(savedOrder);
+        return toResponse(savedOrder, lines);
     }
 
     public OrderResponse cancel(Long orderId) {
@@ -105,7 +112,9 @@ public class OrderService {
 
         if (order.getStatut() == OrderStatus.CONFIRMEE) stock.release(aggregateStock(orderLineRepository.findAllByOrderId(orderId)));
         order.setStatut(OrderStatus.ANNULEE);
-        return toResponse(orderRepository.save(order), orderLineRepository.findAllByOrderId(orderId));
+        Order savedOrder = orderRepository.save(order);
+        orderEventPublisher.publishOrderCancelled(savedOrder);
+        return toResponse(savedOrder, orderLineRepository.findAllByOrderId(orderId));
     }
 
     public OrderResponse updateUser(Long orderId, Long userId) {
