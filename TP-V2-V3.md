@@ -4,7 +4,9 @@ Les configurations centralisées sont dans `config-repo/`. Les noms de service e
 
 ## Préparation
 
-À la première initialisation de PostgreSQL, `docker-compose.yml` charge `docker/postgres/init-databases.sql` pour créer une base séparée par service.
+À la première initialisation de PostgreSQL, `docker-compose.yml` monte `docker/postgres/init-databases.sql` pour créer une base séparée par service. Si le volume de données PostgreSQL existe déjà, les scripts d'initialisation ne sont pas rejoués automatiquement : créez alors les bases manquantes manuellement ou réinitialisez le volume si ses données peuvent être supprimées.
+
+La configuration PostgreSQL commune utilise `DB_USERNAME`, `DB_PASSWORD` et `DB_PORT`. Copiez `.env.example` vers `.env` puis choisissez un mot de passe privé. Compose publie PostgreSQL sur le port hôte 5433 par défaut, ce qui permet de le faire coexister avec une installation PostgreSQL Windows sur 5432. Pour IntelliJ, définissez ces mêmes variables dans les configurations d'exécution des services. Pour utiliser le PostgreSQL Windows existant, réglez `DB_PORT=5432` et saisissez son mot de passe existant; aucun mot de passe par défaut n'est fourni par le projet.
 
 Depuis la racine du projet, démarrez les dépendances :
 

@@ -8,4 +8,5 @@ import java.util.List;
 public interface OrderLineRepository extends JpaRepository<OrderLine, Long> {
     List<OrderLine> findAllByOrderId(Long orderId);
     List<OrderLine> findAllByOrderIdIn(List<Long> orderIds);
+    void deleteAllByOrderId(Long orderId);
 }

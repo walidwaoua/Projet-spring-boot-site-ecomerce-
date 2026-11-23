@@ -11,12 +11,18 @@ import com.ecommerce.commande.exceptions.InvalidOrderStateException;
 import com.ecommerce.commande.exceptions.OrderNotFoundException;
 import com.ecommerce.commande.repositories.OrderLineRepository;
 import com.ecommerce.commande.repositories.OrderRepository;
+import com.ecommerce.commande.clients.*;
+import com.ecommerce.commande.dtos.EnrichedOrderResponse;
+import com.ecommerce.commande.exceptions.ExternalServiceException;
+import com.ecommerce.commande.exceptions.InvalidReferenceException;
+import feign.FeignException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 @Service
@@ -24,10 +30,14 @@ import java.util.stream.Collectors;
 public class OrderService {
     private final OrderRepository orderRepository;
     private final OrderLineRepository orderLineRepository;
+    private final UserClient users;
+    private final ProductClient products;
+    private final StockClient stock;
 
-    public OrderService(OrderRepository orderRepository, OrderLineRepository orderLineRepository) {
+    public OrderService(OrderRepository orderRepository, OrderLineRepository orderLineRepository, UserClient users, ProductClient products, StockClient stock) {
         this.orderRepository = orderRepository;
         this.orderLineRepository = orderLineRepository;
+        this.users = users; this.products = products; this.stock = stock;
     }
 
     @Transactional(readOnly = true)
@@ -54,20 +64,23 @@ public class OrderService {
     }
 
     public OrderResponse create(CreateOrderRequest request) {
-        BigDecimal total = request.lignes().stream()
-            .map(this::lineTotal)
-            .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-        Order order = orderRepository.save(
-            new Order(request.userId(), OrderStatus.EN_ATTENTE_STOCK, total)
-        );
-
-        List<OrderLine> lines = request.lignes().stream()
-            .map(line -> new OrderLine(order.getId(), line.productId(), line.quantite(), line.prixUnitaire()))
-            .toList();
+        validateUser(request.userId());
+        Map<Long, ProductClient.ProductInfo> productData = new java.util.LinkedHashMap<>();
+        for (CreateOrderLineRequest line : request.lignes()) productData.computeIfAbsent(line.productId(), this::getAvailableProduct);
+        BigDecimal total = request.lignes().stream().map(line -> productData.get(line.productId()).prix().multiply(BigDecimal.valueOf(line.quantite()))).reduce(BigDecimal.ZERO, BigDecimal::add);
+        Order order = orderRepository.save(new Order(request.userId(), OrderStatus.EN_ATTENTE_STOCK, total));
+        List<OrderLine> lines = request.lignes().stream().map(line -> new OrderLine(order.getId(), line.productId(), line.quantite(), productData.get(line.productId()).prix())).toList();
         List<OrderLine> savedLines = orderLineRepository.saveAll(lines);
-
-        return toResponse(order, savedLines);
+        List<StockClient.StockQuantity> quantities = aggregateStock(lines);
+        boolean reserved = false;
+        try {
+            stock.reserve(quantities); reserved = true;
+            order.setStatut(OrderStatus.CONFIRMEE);
+            return toResponse(orderRepository.save(order), savedLines);
+        } catch (RuntimeException e) {
+            if (reserved) try { stock.release(quantities); } catch (RuntimeException compensation) { e.addSuppressed(compensation); }
+            throw e;
+        }
     }
 
     public OrderResponse confirm(Long orderId) {
@@ -78,8 +91,10 @@ public class OrderService {
             );
         }
 
+        List<OrderLine> lines = orderLineRepository.findAllByOrderId(orderId);
+        stock.reserve(aggregateStock(lines));
         order.setStatut(OrderStatus.CONFIRMEE);
-        return toResponse(orderRepository.save(order), orderLineRepository.findAllByOrderId(orderId));
+        return toResponse(orderRepository.save(order), lines);
     }
 
     public OrderResponse cancel(Long orderId) {
@@ -88,8 +103,68 @@ public class OrderService {
             throw new InvalidOrderStateException("La commande est déjà annulée");
         }
 
+        if (order.getStatut() == OrderStatus.CONFIRMEE) stock.release(aggregateStock(orderLineRepository.findAllByOrderId(orderId)));
         order.setStatut(OrderStatus.ANNULEE);
         return toResponse(orderRepository.save(order), orderLineRepository.findAllByOrderId(orderId));
+    }
+
+    public OrderResponse updateUser(Long orderId, Long userId) {
+        Order order = getOrder(orderId); validateUser(userId); order.setUserId(userId);
+        return toResponse(orderRepository.save(order), orderLineRepository.findAllByOrderId(orderId));
+    }
+
+    public void delete(Long orderId) {
+        Order order = getOrder(orderId);
+        List<OrderLine> lines = orderLineRepository.findAllByOrderId(orderId);
+        if (order.getStatut() == OrderStatus.CONFIRMEE) stock.release(aggregateStock(lines));
+        orderLineRepository.deleteAllByOrderId(orderId); orderRepository.delete(order);
+    }
+
+    @Transactional(readOnly = true)
+    public List<OrderLineResponse> findLines(Long orderId) {
+        getOrder(orderId); return orderLineRepository.findAllByOrderId(orderId).stream()
+            .map(line -> new OrderLineResponse(line.getId(), line.getProductId(), line.getQuantite(), line.getPrixUnitaire())).toList();
+    }
+
+    public OrderLineResponse addLine(Long orderId, com.ecommerce.commande.dtos.OrderLineRequest request) {
+        Order order = getOrder(orderId); ensureConfirmed(order);
+        ProductClient.ProductInfo product = getAvailableProduct(request.productId());
+        StockClient.StockQuantity reservation = new StockClient.StockQuantity(request.productId(), request.quantite());
+        stock.reserve(List.of(reservation));
+        OrderLine line;
+        try { line = orderLineRepository.save(new OrderLine(orderId, request.productId(), request.quantite(), product.prix())); }
+        catch (RuntimeException failure) { try { stock.release(List.of(reservation)); } catch (RuntimeException compensation) { failure.addSuppressed(compensation); } throw failure; }
+        recalculateTotal(order); return new OrderLineResponse(line.getId(), line.getProductId(), line.getQuantite(), line.getPrixUnitaire());
+    }
+
+    public OrderLineResponse updateLine(Long orderId, Long lineId, com.ecommerce.commande.dtos.OrderLineRequest request) {
+        Order order = getOrder(orderId); ensureConfirmed(order); OrderLine line = getLine(orderId, lineId);
+        ProductClient.ProductInfo product = getAvailableProduct(request.productId());
+        int reserve = Objects.equals(line.getProductId(), request.productId()) ? Math.max(0, request.quantite() - line.getQuantite()) : request.quantite();
+        if (reserve > 0) stock.reserve(List.of(new StockClient.StockQuantity(request.productId(), reserve)));
+        try {
+            int release = Objects.equals(line.getProductId(), request.productId()) ? Math.max(0, line.getQuantite() - request.quantite()) : line.getQuantite();
+            if (release > 0) stock.release(List.of(new StockClient.StockQuantity(line.getProductId(), release)));
+        } catch (RuntimeException failure) {
+            if (reserve > 0) try { stock.release(List.of(new StockClient.StockQuantity(request.productId(), reserve))); } catch (RuntimeException compensation) { failure.addSuppressed(compensation); }
+            throw failure;
+        }
+        line.setProductId(request.productId()); line.setQuantite(request.quantite()); line.setPrixUnitaire(product.prix());
+        OrderLine saved = orderLineRepository.save(line); recalculateTotal(order);
+        return new OrderLineResponse(saved.getId(), saved.getProductId(), saved.getQuantite(), saved.getPrixUnitaire());
+    }
+
+    public void deleteLine(Long orderId, Long lineId) {
+        Order order = getOrder(orderId); ensureConfirmed(order); OrderLine line = getLine(orderId, lineId);
+        stock.release(List.of(new StockClient.StockQuantity(line.getProductId(), line.getQuantite())));
+        orderLineRepository.delete(line); recalculateTotal(order);
+    }
+
+    private void ensureConfirmed(Order order) { if (order.getStatut() != OrderStatus.CONFIRMEE) throw new InvalidOrderStateException("Les lignes ne peuvent être modifiées que sur une commande confirmée"); }
+    private OrderLine getLine(Long orderId, Long lineId) { return orderLineRepository.findById(lineId).filter(l -> l.getOrderId().equals(orderId)).orElseThrow(() -> new OrderNotFoundException(lineId)); }
+    private void recalculateTotal(Order order) {
+        BigDecimal total = orderLineRepository.findAllByOrderId(order.getId()).stream().map(l -> l.getPrixUnitaire().multiply(BigDecimal.valueOf(l.getQuantite()))).reduce(BigDecimal.ZERO, BigDecimal::add);
+        order.setMontantTotal(total); orderRepository.save(order);
     }
 
     private Order getOrder(Long orderId) {
@@ -97,8 +172,33 @@ public class OrderService {
             .orElseThrow(() -> new OrderNotFoundException(orderId));
     }
 
-    private BigDecimal lineTotal(CreateOrderLineRequest line) {
-        return line.prixUnitaire().multiply(BigDecimal.valueOf(line.quantite()));
+    @Transactional(readOnly = true)
+    public EnrichedOrderResponse findEnrichedById(Long orderId) {
+        Order order = getOrder(orderId); List<OrderLine> lines = orderLineRepository.findAllByOrderId(orderId);
+        UserClient.UserInfo user = call(() -> users.findById(order.getUserId()));
+        List<EnrichedOrderResponse.EnrichedLine> enriched = lines.stream().map(line -> {
+            ProductClient.ProductInfo product = call(() -> products.findById(line.getProductId()));
+            Integer available; try { available = stock.findByProduct(line.getProductId()).quantite(); } catch (FeignException.NotFound e) { available = 0; }
+            return new EnrichedOrderResponse.EnrichedLine(line.getId(), line.getProductId(), product.nom(), line.getQuantite(), available, line.getPrixUnitaire());
+        }).toList();
+        return new EnrichedOrderResponse(order.getId(), new EnrichedOrderResponse.UserSummary(user.id(), user.nom(), user.email(), user.role(), user.actif()), order.getDate(), order.getStatut(), order.getMontantTotal(), enriched);
+    }
+
+    private List<StockClient.StockQuantity> aggregateStock(List<OrderLine> lines) {
+        return lines.stream().collect(Collectors.groupingBy(OrderLine::getProductId, Collectors.summingInt(OrderLine::getQuantite)))
+            .entrySet().stream().map(e -> new StockClient.StockQuantity(e.getKey(), e.getValue())).toList();
+    }
+    private void validateUser(Long id) {
+        UserClient.UserInfo user = call(() -> users.findById(id));
+        if (!user.actif()) throw new InvalidReferenceException("L'utilisateur est inactif : " + id);
+    }
+    private ProductClient.ProductInfo getAvailableProduct(Long id) {
+        ProductClient.ProductInfo product = call(() -> products.findById(id));
+        if (!"DISPONIBLE".equals(product.statut()) || product.prix() == null || product.prix().signum() <= 0) throw new InvalidReferenceException("Produit indisponible ou prix invalide : " + id);
+        return product;
+    }
+    private <T> T call(java.util.function.Supplier<T> call) {
+        try { return call.get(); } catch (FeignException.NotFound e) { throw new InvalidReferenceException("Référence externe introuvable"); } catch (FeignException e) { throw new ExternalServiceException("Un service externe est indisponible"); }
     }
 
     private OrderResponse toResponse(Order order, List<OrderLine> lines) {

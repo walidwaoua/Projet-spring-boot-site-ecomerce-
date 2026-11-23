@@ -24,6 +24,19 @@ public class GlobalExceptionHandler {
             .body(Map.of("error", exception.getMessage()));
     }
 
+    @ExceptionHandler(InvalidReferenceException.class)
+    public ResponseEntity<Map<String, String>> invalidReference(InvalidReferenceException exception) { return ResponseEntity.unprocessableEntity().body(Map.of("error", exception.getMessage())); }
+
+    @ExceptionHandler(ExternalServiceException.class)
+    public ResponseEntity<Map<String, String>> externalUnavailable(ExternalServiceException exception) { return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Map.of("error", exception.getMessage())); }
+
+    @ExceptionHandler(feign.FeignException.class)
+    public ResponseEntity<Map<String, String>> remoteFailure(feign.FeignException exception) {
+        HttpStatus status = exception.status() == 409 || exception.status() == 404 ? HttpStatus.CONFLICT : HttpStatus.SERVICE_UNAVAILABLE;
+        String message = status == HttpStatus.CONFLICT ? "Réservation de stock impossible" : "Service externe indisponible";
+        return ResponseEntity.status(status).body(Map.of("error", message));
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, String>> invalidRequest(MethodArgumentNotValidException exception) {
         String message = exception.getBindingResult().getFieldErrors().stream()
