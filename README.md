@@ -57,6 +57,10 @@ mvn test
 
 Ces tests automatisés utilisent les dépendances isolées prévues par les profils de test. Le script `test-infrastructure.ps1` vérifie séparément les vrais conteneurs PostgreSQL et RabbitMQ.
 
+## Démonstration V6
+
+Les scénarios de validation Feign nominale, d’indisponibilité distante (retry et circuit breaker) et de rejeu idempotent sont décrits dans [`postman/V6-demonstration.md`](postman/V6-demonstration.md). La création `POST /orders` exige maintenant l’en-tête `Idempotency-Key`.
+
 ## Arrêter les conteneurs
 
 ```powershell

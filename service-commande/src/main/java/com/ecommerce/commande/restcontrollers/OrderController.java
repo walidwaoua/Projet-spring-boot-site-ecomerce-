@@ -5,6 +5,7 @@ import com.ecommerce.commande.dtos.OrderResponse;
 import com.ecommerce.commande.dtos.EnrichedOrderResponse;
 import com.ecommerce.commande.dtos.OrderLineRequest;
 import com.ecommerce.commande.dtos.OrderLineResponse;
+import com.ecommerce.commande.dtos.OrderCreationResult;
 import com.ecommerce.commande.services.OrderService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -18,6 +19,8 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.http.ResponseEntity;
 
 import java.util.List;
 
@@ -63,9 +66,12 @@ public class OrderController {
     public void delete(@PathVariable Long id) { orderService.delete(id); }
 
     @PostMapping
-    @ResponseStatus(HttpStatus.CREATED)
-    public OrderResponse create(@Valid @RequestBody CreateOrderRequest request) {
-        return orderService.create(request);
+    public ResponseEntity<OrderResponse> create(@RequestHeader("Idempotency-Key") String idempotencyKey,
+                                                @Valid @RequestBody CreateOrderRequest request) {
+        OrderCreationResult result = orderService.create(request, idempotencyKey);
+        return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED)
+            .header("Idempotency-Replayed", Boolean.toString(result.replayed()))
+            .body(result.order());
     }
 
     @PostMapping("/{id}/confirm")

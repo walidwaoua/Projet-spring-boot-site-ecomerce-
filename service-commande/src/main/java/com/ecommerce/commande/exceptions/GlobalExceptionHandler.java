@@ -8,6 +8,8 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.util.Map;
+import com.ecommerce.commande.exceptions.IdempotencyConflictException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -29,6 +31,16 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(ExternalServiceException.class)
     public ResponseEntity<Map<String, String>> externalUnavailable(ExternalServiceException exception) { return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Map.of("error", exception.getMessage())); }
+
+    @ExceptionHandler(IdempotencyConflictException.class)
+    public ResponseEntity<Map<String, String>> idempotencyConflict(IdempotencyConflictException exception) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", exception.getMessage()));
+    }
+
+    @ExceptionHandler({IllegalArgumentException.class, MissingRequestHeaderException.class})
+    public ResponseEntity<Map<String, String>> badRequest(Exception exception) {
+        return ResponseEntity.badRequest().body(Map.of("error", "Requête invalide ou en-tête Idempotency-Key manquant"));
+    }
 
     @ExceptionHandler(feign.FeignException.class)
     public ResponseEntity<Map<String, String>> remoteFailure(feign.FeignException exception) {

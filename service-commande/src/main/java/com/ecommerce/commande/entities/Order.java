@@ -35,6 +35,12 @@ public class Order {
     @Column(name = "montant_total", nullable = false, precision = 12, scale = 2)
     private BigDecimal montantTotal;
 
+    @Column(name = "idempotency_key", unique = true, length = 128)
+    private String idempotencyKey;
+
+    @Column(name = "request_hash", length = 64)
+    private String requestHash;
+
     protected Order() {
     }
 
@@ -42,6 +48,12 @@ public class Order {
         this.userId = userId;
         this.statut = statut;
         this.montantTotal = montantTotal;
+    }
+
+    public Order(Long userId, OrderStatus statut, BigDecimal montantTotal, String idempotencyKey, String requestHash) {
+        this(userId, statut, montantTotal);
+        this.idempotencyKey = idempotencyKey;
+        this.requestHash = requestHash;
     }
 
     @PrePersist
@@ -61,4 +73,6 @@ public class Order {
     public void setStatut(OrderStatus statut) { this.statut = statut; }
     public BigDecimal getMontantTotal() { return montantTotal; }
     public void setMontantTotal(BigDecimal montantTotal) { this.montantTotal = montantTotal; }
+    public String getIdempotencyKey() { return idempotencyKey; }
+    public String getRequestHash() { return requestHash; }
 }

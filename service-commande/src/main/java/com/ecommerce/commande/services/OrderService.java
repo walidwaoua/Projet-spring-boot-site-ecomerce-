@@ -14,9 +14,13 @@ import com.ecommerce.commande.repositories.OrderLineRepository;
 import com.ecommerce.commande.repositories.OrderRepository;
 import com.ecommerce.commande.clients.*;
 import com.ecommerce.commande.dtos.EnrichedOrderResponse;
+import com.ecommerce.commande.dtos.OrderCreationResult;
 import com.ecommerce.commande.exceptions.ExternalServiceException;
+import com.ecommerce.commande.exceptions.IdempotencyConflictException;
 import com.ecommerce.commande.exceptions.InvalidReferenceException;
 import feign.FeignException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -24,6 +28,10 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.stream.Collectors;
 
 @Service
@@ -35,12 +43,14 @@ public class OrderService {
     private final ProductClient products;
     private final StockClient stock;
     private final OrderEventPublisher orderEventPublisher;
+    private final FeignResilienceExecutor externalCalls;
 
-    public OrderService(OrderRepository orderRepository, OrderLineRepository orderLineRepository, UserClient users, ProductClient products, StockClient stock, OrderEventPublisher orderEventPublisher) {
+    public OrderService(OrderRepository orderRepository, OrderLineRepository orderLineRepository, UserClient users, ProductClient products, StockClient stock, OrderEventPublisher orderEventPublisher, FeignResilienceExecutor externalCalls) {
         this.orderRepository = orderRepository;
         this.orderLineRepository = orderLineRepository;
         this.users = users; this.products = products; this.stock = stock;
         this.orderEventPublisher = orderEventPublisher;
+        this.externalCalls = externalCalls;
     }
 
     @Transactional(readOnly = true)
@@ -66,12 +76,29 @@ public class OrderService {
         return toResponse(order, orderLineRepository.findAllByOrderId(orderId));
     }
 
-    public OrderResponse create(CreateOrderRequest request) {
+    public OrderCreationResult create(CreateOrderRequest request, String idempotencyKey) {
+        if (idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 128) {
+            throw new IllegalArgumentException("L'en-tête Idempotency-Key est obligatoire et limité à 128 caractères");
+        }
+        String requestHash = fingerprint(request);
+        var existingOrder = orderRepository.findByIdempotencyKey(idempotencyKey);
+        if (existingOrder.isPresent()) {
+            Order existing = existingOrder.get();
+            if (!requestHash.equals(existing.getRequestHash())) {
+                throw new IdempotencyConflictException("Cette clé Idempotency-Key est déjà associée à une autre demande");
+            }
+            return new OrderCreationResult(toResponse(existing, orderLineRepository.findAllByOrderId(existing.getId())), true);
+        }
         validateUser(request.userId());
         Map<Long, ProductClient.ProductInfo> productData = new java.util.LinkedHashMap<>();
         for (CreateOrderLineRequest line : request.lignes()) productData.computeIfAbsent(line.productId(), this::getAvailableProduct);
         BigDecimal total = request.lignes().stream().map(line -> productData.get(line.productId()).prix().multiply(BigDecimal.valueOf(line.quantite()))).reduce(BigDecimal.ZERO, BigDecimal::add);
-        Order order = orderRepository.save(new Order(request.userId(), OrderStatus.EN_ATTENTE_STOCK, total));
+        Order order;
+        try {
+            order = orderRepository.save(new Order(request.userId(), OrderStatus.EN_ATTENTE_STOCK, total, idempotencyKey, requestHash));
+        } catch (DataIntegrityViolationException concurrentReplay) {
+            throw new IdempotencyConflictException("Une demande avec cette Idempotency-Key est déjà en cours; rejouez la même demande après sa réponse");
+        }
         List<OrderLine> lines = request.lignes().stream().map(line -> new OrderLine(order.getId(), line.productId(), line.quantite(), productData.get(line.productId()).prix())).toList();
         List<OrderLine> savedLines = orderLineRepository.saveAll(lines);
         List<StockClient.StockQuantity> quantities = aggregateStock(lines);
@@ -81,7 +108,7 @@ public class OrderService {
             order.setStatut(OrderStatus.CONFIRMEE);
             Order savedOrder = orderRepository.save(order);
             orderEventPublisher.publishOrderConfirmed(savedOrder);
-            return toResponse(savedOrder, savedLines);
+            return new OrderCreationResult(toResponse(savedOrder, savedLines), false);
         } catch (RuntimeException e) {
             if (reserved) try { stock.release(quantities); } catch (RuntimeException compensation) { e.addSuppressed(compensation); }
             throw e;
@@ -184,9 +211,9 @@ public class OrderService {
     @Transactional(readOnly = true)
     public EnrichedOrderResponse findEnrichedById(Long orderId) {
         Order order = getOrder(orderId); List<OrderLine> lines = orderLineRepository.findAllByOrderId(orderId);
-        UserClient.UserInfo user = call(() -> users.findById(order.getUserId()));
+        UserClient.UserInfo user = call("utilisateurs", () -> users.findById(order.getUserId()));
         List<EnrichedOrderResponse.EnrichedLine> enriched = lines.stream().map(line -> {
-            ProductClient.ProductInfo product = call(() -> products.findById(line.getProductId()));
+            ProductClient.ProductInfo product = call("catalogue", () -> products.findById(line.getProductId()));
             Integer available; try { available = stock.findByProduct(line.getProductId()).quantite(); } catch (FeignException.NotFound e) { available = 0; }
             return new EnrichedOrderResponse.EnrichedLine(line.getId(), line.getProductId(), product.nom(), line.getQuantite(), available, line.getPrixUnitaire());
         }).toList();
@@ -198,16 +225,29 @@ public class OrderService {
             .entrySet().stream().map(e -> new StockClient.StockQuantity(e.getKey(), e.getValue())).toList();
     }
     private void validateUser(Long id) {
-        UserClient.UserInfo user = call(() -> users.findById(id));
+        UserClient.UserInfo user = call("utilisateurs", () -> users.findById(id));
         if (!user.actif()) throw new InvalidReferenceException("L'utilisateur est inactif : " + id);
     }
     private ProductClient.ProductInfo getAvailableProduct(Long id) {
-        ProductClient.ProductInfo product = call(() -> products.findById(id));
+        ProductClient.ProductInfo product = call("catalogue", () -> products.findById(id));
         if (!"DISPONIBLE".equals(product.statut()) || product.prix() == null || product.prix().signum() <= 0) throw new InvalidReferenceException("Produit indisponible ou prix invalide : " + id);
         return product;
     }
-    private <T> T call(java.util.function.Supplier<T> call) {
-        try { return call.get(); } catch (FeignException.NotFound e) { throw new InvalidReferenceException("Référence externe introuvable"); } catch (FeignException e) { throw new ExternalServiceException("Un service externe est indisponible"); }
+    private <T> T call(String service, java.util.function.Supplier<T> call) {
+        try {
+            return externalCalls.execute(service, call);
+        } catch (FeignException.NotFound e) { throw new InvalidReferenceException("Référence externe introuvable"); }
+        catch (FeignException | CallNotPermittedException e) { throw new ExternalServiceException("Un service externe est indisponible"); }
+    }
+
+    private String fingerprint(CreateOrderRequest request) {
+        String canonical = request.userId() + ":" + request.lignes().stream()
+            .map(line -> line.productId() + "x" + line.quantite()).collect(Collectors.joining(","));
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is required by the Java runtime", impossible);
+        }
     }
 
     private OrderResponse toResponse(Order order, List<OrderLine> lines) {
